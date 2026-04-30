@@ -334,6 +334,14 @@ def run_global_bias_adjustment():
             )
             current += 1
 
+    # current = 1
+    # for lat_start_idx in reversed(lats_idx):
+    #     for lon_start_idx in reversed(lons_idx):
+    #         process_chunk(
+    #             lat_start_idx, lon_start_idx, total_chunks, current, land_mask
+    #         )
+    #         current += 1
+
     total_elapsed = (time.time() - global_start_time) / 3600
     print(f"Global bias adjustment completed in {total_elapsed:.2f} hours.")
 
