@@ -237,7 +237,7 @@ def process_chunk(
 
     # 7. Apply ibicus ISIMIP debiaser
     print("Applying ISIMIP debiaser...")
-    debiaser = ISIMIP.from_variable(tas)
+    debiaser = ISIMIP.from_variable(tas, running_window_step_length=3)
 
     # We use ibicus's internal parallelization
     res_vals = debiaser.apply(
@@ -329,6 +329,9 @@ def run_global_bias_adjustment():
     current = 1
     for lat_start_idx in lats_idx:
         for lon_start_idx in lons_idx:
+            if current < 42:
+                current += 1
+                continue
             process_chunk(
                 lat_start_idx, lon_start_idx, total_chunks, current, land_mask
             )
