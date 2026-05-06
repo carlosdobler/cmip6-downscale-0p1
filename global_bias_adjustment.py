@@ -1,0 +1,635 @@
+import argparse
+import os
+import gc
+import time
+import logging
+import warnings
+from datetime import datetime, timedelta
+import xarray as xr
+import xarray_regrid
+import fsspec
+import numpy as np
+import dask.array as da
+import multiprocessing
+from ibicus.debias import ISIMIP
+from ibicus.variables import tas, pr
+from ibicus.utils import get_library_logger
+
+# Prevent OpenBLAS from over-threading
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
+# Suppress ibicus logging warnings
+ibicus_logger = get_library_logger()
+ibicus_logger.setLevel(logging.ERROR)
+
+# Suppress specific ibicus UserWarnings (expected NaNs from masking, and progress bar)
+warnings.filterwarnings(
+    "ignore", message=".*contains inf or nan values.*", category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", message=".*progressbar argument is ignored.*", category=UserWarning
+)
+
+
+# CONFIGURATION
+WORKERS = 47
+MODEL_NAME = "MPI-ESM1-2-HR"
+
+VARIABLE_CONFIG = {
+    "tas": {
+        "ibicus_var": tas,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/temperature_2m.zarr",
+        "era5_var": "temperature_2m",
+        "cmip6_var": "tas",
+        "interpolation": "linear",
+    },
+    "pr": {
+        "ibicus_var": pr,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/total_precipitation_sum.zarr",
+        "era5_var": "total_precipitation_sum",
+        "cmip6_var": "pr",
+        "interpolation": "conservative",
+    },
+}
+
+# The following variables will be set dynamically in run_global_bias_adjustment
+VARIABLE = None
+VAR_SETTINGS = None
+ERA5_LAND_PATH = None
+CMIP6_HIST_PATH = None
+CMIP6_SSP585_PATH = None
+OUTPUT_ZARR_PATH = None
+STATUS_DIR = None
+
+# TIME RANGES
+TRAIN_START, TRAIN_END = "1971-01-01", "2010-12-31"
+INFER_START, INFER_END = "1961-01-01", "2099-12-31"
+
+# CHUNKING
+CHUNK_SIZE = 120
+
+
+# PREPROCESSING HELPERS
+def load_cmip6_aligned(hist_path: str, ssp_path: str) -> xr.Dataset:
+    """
+    Loads CMIP6 datasets and aligns longitude to -180-180.
+    """
+    ds_hist = xr.open_zarr(hist_path)
+    ds_ssp = xr.open_zarr(ssp_path)
+    ds = xr.concat([ds_hist, ds_ssp], dim="time").sel(
+        time=slice(INFER_START, INFER_END)
+    )
+    # Map 0...360 to -180...180
+    ds = ds.assign_coords(lon=(((ds.lon + 180) % 360) - 180))
+    return ds.sortby("lon")
+
+
+def get_cmip6_chunk(
+    ds: xr.Dataset,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+) -> xr.Dataset:
+    """
+    Slice CMIP6 data to extent, handling circular longitude wrapping.
+    No buffer needed for bias adjustment.
+    """
+    # Increase buffer to 4.0 for sequential interpolation safety
+    buffer = 4.0
+
+    # step 1: slice longitude (circular wrapping)
+    lon_min_buf, lon_max_buf = lon_min - buffer, lon_max + buffer
+
+    if lon_min_buf < -180 or lon_max_buf > 180:
+        if lon_min_buf < -180:
+            west_part = ds.sel(lon=slice(lon_min_buf + 360, 180))
+            east_part = ds.sel(lon=slice(-180, lon_max_buf))
+            west_part = west_part.assign_coords(lon=west_part.lon - 360)
+            ds_buffered = xr.concat([west_part, east_part], dim="lon")
+        else:
+            west_part = ds.sel(lon=slice(lon_min_buf, 180))
+            east_part = ds.sel(lon=slice(-180, lon_max_buf - 360))
+            east_part = east_part.assign_coords(lon=east_part.lon + 360)
+            ds_buffered = xr.concat([west_part, east_part], dim="lon")
+    else:
+        ds_buffered = ds.sel(lon=slice(lon_min_buf, lon_max_buf))
+
+    # step 2: slice latitude
+    lat_min_buf, lat_max_buf = (
+        min(lat_min, lat_max) - buffer,
+        max(lat_min, lat_max) + buffer,
+    )
+    return ds_buffered.sel(lat=slice(lat_min_buf, lat_max_buf)).load()
+
+
+def interpolate_cmip6(
+    ds: xr.Dataset, target_grid: xr.Dataset, method: str
+) -> xr.DataArray:
+    """
+    Interpolates CMIP6 to target grid using specified method.
+    """
+    ds_renamed = ds.rename({"lat": "latitude", "lon": "longitude"})
+
+    if method == "linear":
+        return ds_renamed.regrid.linear(target_grid)[VAR_SETTINGS["cmip6_var"]]
+    elif method == "conservative":
+        # Sequential interpolation: 1.6 -> 0.8 -> 0.4 -> 0.2 -> 0.1
+        resolutions = [1.6, 0.8, 0.4, 0.2]
+        current_ds = ds_renamed
+
+        target_lats = target_grid.latitude.values
+        target_lons = target_grid.longitude.values
+        lat_min, lat_max = target_lats.min(), target_lats.max()
+        lon_min, lon_max = target_lons.min(), target_lons.max()
+
+        for res in resolutions:
+            # Create intermediate grid aligned with ERA5-Land (multiples of 0.1)
+            # We anchor to 90N and -180E to ensure alignment since res is a multiple of 0.1
+            grid_lat_max = 90.0 - np.floor((90.0 - lat_max) / res) * res
+            grid_lat_min = 90.0 - np.ceil((90.0 - lat_min) / res) * res
+            grid_lon_min = -180.0 + np.floor((lon_min - (-180.0)) / res) * res
+            grid_lon_max = -180.0 + np.ceil((lon_max - (-180.0)) / res) * res
+
+            # Ensure we don't exceed global bounds
+            grid_lat_max = min(grid_lat_max, 90.0)
+            grid_lat_min = max(grid_lat_min, -90.0)
+
+            inter_lats = np.arange(grid_lat_max, grid_lat_min - res / 10, -res)
+            inter_lons = np.arange(grid_lon_min, grid_lon_max + res / 10, res)
+
+            inter_grid = xr.Dataset(
+                coords={
+                    "latitude": inter_lats,
+                    "longitude": inter_lons,
+                }
+            )
+            current_ds = current_ds.regrid.conservative(inter_grid)
+
+        # Final step to 0.1 (target_grid)
+        return current_ds.regrid.conservative(target_grid)[VAR_SETTINGS["cmip6_var"]]
+    else:
+        raise ValueError(f"Unknown interpolation method: {method}")
+
+
+def initialize_global_zarr():
+    print("Initializing global Zarr store...")
+    ds_temp = xr.open_zarr(ERA5_LAND_PATH)
+    lats, lons = ds_temp.y.values, ds_temp.x.values
+
+    ds_cmip = load_cmip6_aligned(CMIP6_HIST_PATH, CMIP6_SSP585_PATH)
+    time_coords = ds_cmip.time
+
+    shape = (len(time_coords), len(lats), len(lons))
+    chunks = (1000, CHUNK_SIZE, CHUNK_SIZE)
+
+    ds_out = xr.Dataset(
+        data_vars={
+            VARIABLE: (
+                ("time", "latitude", "longitude"),
+                da.full(shape, np.nan, chunks=chunks, dtype=np.float32),
+            )
+        },
+        coords={"time": time_coords, "latitude": lats, "longitude": lons},
+    )
+
+    for var in ds_out.variables:
+        ds_out[var].encoding.clear()
+
+    for var in ds_out.data_vars:
+        ds_out[var].encoding["fill_value"] = np.nan
+
+    ds_out.to_zarr(OUTPUT_ZARR_PATH, compute=False, mode="w", zarr_format=3)
+    print("Initialization complete.")
+
+
+def get_chunk_id(lat_idx: int, lon_idx: int) -> str:
+    return f"lat_{lat_idx}_lon_{lon_idx}"
+
+
+def mark_chunk_done(chunk_id: str):
+    fs = fsspec.filesystem("gs")
+    done_file = f"{STATUS_DIR}{chunk_id}.done"
+    started_file = f"{STATUS_DIR}{chunk_id}.started"
+    fs.touch(done_file)
+    if fs.exists(started_file):
+        fs.rm(started_file)
+
+
+def process_chunk(
+    lat_idx_start: int,
+    lon_idx_start: int,
+    total_count: int,
+    current_idx: int,
+    land_mask_master: xr.DataArray,
+):
+    chunk_id = get_chunk_id(lat_idx_start, lon_idx_start)
+
+    # 1. Determine actual chunk size
+    if lat_idx_start == 1680:
+        actual_h = 121
+    else:
+        actual_h = CHUNK_SIZE
+    actual_w = CHUNK_SIZE
+
+    lat_idx_end, lon_idx_end = lat_idx_start + actual_h, lon_idx_start + actual_w
+
+    # 2. Land mask skip
+    mask_chunk = land_mask_master.isel(
+        y=slice(lat_idx_start, lat_idx_end), x=slice(lon_idx_start, lon_idx_end)
+    )
+    if not mask_chunk.any():
+        print(
+            f"[{current_idx}/{total_count}] Lat {lat_idx_start}, Lon {lon_idx_start} | 100% ocean: skipping."
+        )
+        mark_chunk_done(chunk_id)
+        return
+
+    chunk_start_time = time.time()
+    time_now = (datetime.now() - timedelta(hours=6)).strftime("%H:%M")
+    print(
+        f"[{current_idx}/{total_count}] Lat {lat_idx_start}, Lon {lon_idx_start} | Started {time_now}..."
+    )
+
+    # 3. Load ERA5-Land (observations)
+    ds_obs_full = xr.open_zarr(ERA5_LAND_PATH)[VAR_SETTINGS["era5_var"]]
+    # Use index-based slicing for ERA5-Land
+    obs_chunk = (
+        ds_obs_full.isel(
+            y=slice(lat_idx_start, lat_idx_end), x=slice(lon_idx_start, lon_idx_end)
+        )
+        .sel(time=slice(TRAIN_START, TRAIN_END))
+        .load()
+    )
+
+    # Rename to match standard
+    obs_chunk = obs_chunk.rename({"y": "latitude", "x": "longitude"})
+
+    # 4. Load CMIP6
+    ds_cmip_full = load_cmip6_aligned(CMIP6_HIST_PATH, CMIP6_SSP585_PATH)
+    target_lats = land_mask_master.y.isel(y=slice(lat_idx_start, lat_idx_end)).values
+    target_lons = land_mask_master.x.isel(x=slice(lon_idx_start, lon_idx_end)).values
+
+    cmip_chunk_raw = get_cmip6_chunk(
+        ds_cmip_full,
+        target_lons.min(),
+        target_lons.max(),
+        target_lats.min(),
+        target_lats.max(),
+    )
+
+    # 5. Interpolate CMIP6 to 0.1 degree grid
+    print("Interpolating CMIP6...")
+    target_grid = xr.Dataset(
+        coords={
+            "latitude": target_lats,
+            "longitude": target_lons,
+        }
+    )
+    cmip_chunk_interp = interpolate_cmip6(
+        cmip_chunk_raw, target_grid, method=VAR_SETTINGS["interpolation"]
+    ).load()
+
+    # 6. Prepare data for ibicus
+    # Rename mask dimensions to match our standardized format
+    mask_chunk_aligned = mask_chunk.rename({"y": "latitude", "x": "longitude"})
+
+    cm_hist = cmip_chunk_interp.sel(time=slice(TRAIN_START, TRAIN_END)).where(
+        mask_chunk_aligned
+    )
+    cm_fut = cmip_chunk_interp.sel(time=slice(INFER_START, INFER_END)).where(
+        mask_chunk_aligned
+    )
+    obs_hist = obs_chunk.sel(time=slice(TRAIN_START, TRAIN_END)).where(
+        mask_chunk_aligned
+    )
+
+    # Ibicus expects (time, lat, lon)
+    # Ensure dimensions are (time, latitude, longitude) and cast to float32 for speed
+    obs_hist_vals = obs_hist.transpose("time", "latitude", "longitude").values.astype(
+        np.float32
+    )
+    cm_hist_vals = cm_hist.transpose("time", "latitude", "longitude").values.astype(
+        np.float32
+    )
+    cm_fut_vals = cm_fut.transpose("time", "latitude", "longitude").values.astype(
+        np.float32
+    )
+
+    # 7. Apply ibicus ISIMIP debiaser
+    print("Applying ISIMIP debiaser...")
+    debiaser = ISIMIP.from_variable(
+        VAR_SETTINGS["ibicus_var"], running_window_step_length=3
+    )
+
+    # We use ibicus's internal parallelization
+    res_vals = debiaser.apply(
+        obs_hist_vals,
+        cm_hist_vals,
+        cm_fut_vals,
+        time_obs=obs_hist.time.values,
+        time_cm_hist=cm_hist.time.values,
+        time_cm_future=cm_fut.time.values,
+        parallel=True,
+        nr_processes=WORKERS,
+        failsafe=True,
+    )
+
+    # 8. Save result
+    ds_res = xr.Dataset(
+        data_vars={VARIABLE: (("time", "latitude", "longitude"), res_vals)},
+        coords={
+            "time": cm_fut.time,
+            "latitude": target_lats,
+            "longitude": target_lons,
+        },
+    )
+
+    # remove default formatting (already set in initialized zarr)
+    for var in ds_res.variables:
+        ds_res[var].encoding = {}
+
+    # drop any variables (like 'height') that don't have the expected dimensions
+    # this fixes the ValueError when setting `region` explicitly in to_zarr()
+    ds_res = ds_res.drop_vars(
+        [
+            v
+            for v in ds_res.variables
+            if not any(
+                dim in ds_res[v].dims for dim in ["time", "latitude", "longitude"]
+            )
+        ]
+    )
+
+    ds_res.to_zarr(
+        OUTPUT_ZARR_PATH,
+        region={
+            "time": slice(0, len(cm_fut.time)),
+            "latitude": slice(lat_idx_start, lat_idx_end),
+            "longitude": slice(lon_idx_start, lon_idx_end),
+        },
+        zarr_format=3,
+    )
+
+    mark_chunk_done(chunk_id)
+
+    elapsed = (time.time() - chunk_start_time) / 60
+    print(f"Done in {elapsed:.2f} min.\n")
+
+    # Cleanup
+    del (
+        obs_chunk,
+        cmip_chunk_raw,
+        cmip_chunk_interp,
+        cm_hist,
+        cm_fut,
+        obs_hist,
+        res_vals,
+        ds_res,
+    )
+    gc.collect()
+
+
+def finalize_longitude_wrap():
+    """
+    Copies data from longitude index 0 (-180.0) to index 3600 (180.0).
+    Executed once all chunks are processed.
+    """
+    fs = fsspec.filesystem("gs")
+    wrap_done_file = f"{STATUS_DIR}longitude_wrap.done"
+    if fs.exists(wrap_done_file):
+        print("Longitude wrap already finalized.")
+        return
+
+    print("Finalizing longitude wrap (copying index 0 to 3600)...")
+    ds_out = xr.open_zarr(OUTPUT_ZARR_PATH)
+
+    # Process in latitude chunks to stay memory-efficient
+    lats_idx = range(0, 1800, CHUNK_SIZE)
+
+    for lat_start_idx in lats_idx:
+        if lat_start_idx == 1680:
+            actual_h = 121
+        else:
+            actual_h = CHUNK_SIZE
+        lat_idx_end = lat_start_idx + actual_h
+
+        # Load column 0 data
+        col0_data = (
+            ds_out[VARIABLE]
+            .isel(latitude=slice(lat_start_idx, lat_idx_end), longitude=0)
+            .load()
+        )
+
+        # Create dataset for the 180.0 longitude (index 3600)
+        ds_wrap = xr.Dataset(
+            data_vars={
+                VARIABLE: (
+                    ("time", "latitude", "longitude"),
+                    col0_data.values[:, :, np.newaxis],
+                )
+            },
+            coords={
+                "time": col0_data.time,
+                "latitude": col0_data.latitude,
+                "longitude": [ds_out.longitude.values[3600]],
+            },
+        )
+
+        # Clear encoding and drop unrelated variables
+        for var in ds_wrap.variables:
+            ds_wrap[var].encoding = {}
+        ds_wrap = ds_wrap.drop_vars(
+            [
+                v
+                for v in ds_wrap.variables
+                if not any(
+                    dim in ds_wrap[v].dims for dim in ["time", "latitude", "longitude"]
+                )
+            ]
+        )
+
+        # Save to index 3600
+        ds_wrap.to_zarr(
+            OUTPUT_ZARR_PATH,
+            region={
+                "time": slice(0, len(col0_data.time)),
+                "latitude": slice(lat_start_idx, lat_idx_end),
+                "longitude": slice(3600, 3601),
+            },
+            zarr_format=3,
+        )
+        print(f"Wrapped latitude slice {lat_start_idx}:{lat_idx_end}")
+
+    fs.touch(wrap_done_file)
+    print("Longitude wrap complete.")
+
+
+def finalize_south_pole():
+    """
+    Copies data from latitude index 1799 (-89.9) to index 1800 (-90.0)
+    ONLY if index 1800 is currently empty (all NaNs).
+    """
+    fs = fsspec.filesystem("gs")
+    pole_done_file = f"{STATUS_DIR}south_pole.done"
+    if fs.exists(pole_done_file):
+        print("South pole already finalized.")
+        return
+
+    print("Checking if South Pole row (index 1800) needs filling...")
+    ds_out = xr.open_zarr(OUTPUT_ZARR_PATH)
+
+    # Check if index 1800 has any non-NaN data (sample first time step for speed)
+    # We use .any() to see if there is ANY valid data there.
+    has_data = ds_out[VARIABLE].isel(latitude=1800, time=0).notnull().any().values
+
+    if has_data:
+        print("South Pole already has data. Skipping fill.")
+        fs.touch(pole_done_file)
+        return
+
+    print("South Pole (index 1800) is empty. Copying index 1799 to 1800...")
+
+    # Process in longitude chunks to stay memory-efficient
+    lons_idx = range(0, 3601, CHUNK_SIZE)
+
+    for lon_start_idx in lons_idx:
+        lon_idx_end = min(lon_start_idx + CHUNK_SIZE, 3601)
+
+        # Load row 1799 data
+        row1799_data = (
+            ds_out[VARIABLE]
+            .isel(latitude=1799, longitude=slice(lon_start_idx, lon_idx_end))
+            .load()
+        )
+
+        # Create dataset for the -90.0 latitude (index 1800)
+        ds_pole = xr.Dataset(
+            data_vars={
+                VARIABLE: (
+                    ("time", "latitude", "longitude"),
+                    row1799_data.values[:, np.newaxis, :],
+                )
+            },
+            coords={
+                "time": row1799_data.time,
+                "latitude": [ds_out.latitude.values[1800]],
+                "longitude": row1799_data.longitude,
+            },
+        )
+
+        # Clear encoding and drop unrelated variables
+        for var in ds_pole.variables:
+            ds_pole[var].encoding = {}
+        ds_pole = ds_pole.drop_vars(
+            [
+                v
+                for v in ds_pole.variables
+                if not any(
+                    dim in ds_pole[v].dims for dim in ["time", "latitude", "longitude"]
+                )
+            ]
+        )
+
+        # Save to index 1800
+        ds_pole.to_zarr(
+            OUTPUT_ZARR_PATH,
+            region={
+                "time": slice(0, len(row1799_data.time)),
+                "latitude": slice(1800, 1801),
+                "longitude": slice(lon_start_idx, lon_idx_end),
+            },
+            zarr_format=3,
+        )
+        print(f"Filled South Pole for longitude slice {lon_start_idx}:{lon_idx_end}")
+
+    fs.touch(pole_done_file)
+    print("South pole finalization complete.")
+
+
+def run_global_bias_adjustment():
+    multiprocessing.set_start_method("spawn", force=True)
+
+    # Load land mask
+    print("Loading land mask...")
+    ds_temp = xr.open_zarr(ERA5_LAND_PATH)[VAR_SETTINGS["era5_var"]].isel(time=0).load()
+    land_mask = ds_temp != 0.0
+
+    lats_idx = range(0, 1800, CHUNK_SIZE)
+    lons_idx = range(0, 3600, CHUNK_SIZE)
+    total_chunks = len(lats_idx) * len(lons_idx)
+
+    # Initialize store if not already done
+    fs = fsspec.filesystem("gs")
+    # Check for Zarr V3 metadata file to ensure it exists
+    if not fs.exists(f"{OUTPUT_ZARR_PATH}/zarr.json"):
+        initialize_global_zarr()
+
+    # Ensure status directory exists
+    if not fs.exists(STATUS_DIR):
+        fs.makedirs(STATUS_DIR)
+
+    print(
+        f"Starting global bias adjustment for {VARIABLE} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}..."
+    )
+    global_start_time = time.time()
+
+    current = 1
+    for lat_start_idx in lats_idx:
+        for lon_start_idx in lons_idx:
+            chunk_id = get_chunk_id(lat_start_idx, lon_start_idx)
+            done_file = f"{STATUS_DIR}{chunk_id}.done"
+            started_file = f"{STATUS_DIR}{chunk_id}.started"
+
+            # Check if chunk is already processed or being processed
+            if fs.exists(done_file) or fs.exists(started_file):
+                # print(f"[{current}/{total_chunks}] Skipping {chunk_id} (already done or started).")
+                current += 1
+                continue
+
+            # Atomic lock: create .started file
+            try:
+                fs.touch(started_file)
+            except Exception as e:
+                print(f"Failed to lock {chunk_id}: {e}")
+                current += 1
+                continue
+
+            process_chunk(
+                lat_start_idx, lon_start_idx, total_chunks, current, land_mask
+            )
+            current += 1
+
+    # Copy longitude index 0 to index 3600 to complete the global wrap
+    finalize_longitude_wrap()
+
+    # Copy latitude index 1799 to index 1800 to fill missing South Pole
+    finalize_south_pole()
+
+    total_elapsed = (time.time() - global_start_time) / 3600
+    print(f"Global bias adjustment completed in {total_elapsed:.2f} hours.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run global bias adjustment.")
+    parser.add_argument(
+        "-v",
+        "--variable",
+        type=str,
+        default="tas",
+        choices=["tas", "pr"],
+        help="Variable to downscale (tas or pr).",
+    )
+    args = parser.parse_args()
+
+    # Set dynamic variables globally
+    VARIABLE = args.variable
+    VAR_SETTINGS = VARIABLE_CONFIG[VARIABLE]
+    ERA5_LAND_PATH = VAR_SETTINGS["era5_path"]
+    CMIP6_HIST_PATH = f"gs://cmip6/CMIP6/CMIP/MPI-M/{MODEL_NAME}/historical/r1i1p1f1/day/{VAR_SETTINGS['cmip6_var']}/gn/v20190710/"
+    CMIP6_SSP585_PATH = f"gs://cmip6/CMIP6/ScenarioMIP/DKRZ/{MODEL_NAME}/ssp585/r1i1p1f1/day/{VAR_SETTINGS['cmip6_var']}/gn/v20190710/"
+    OUTPUT_ZARR_PATH = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/daily/{VARIABLE}/{VARIABLE}_{MODEL_NAME}_ww-isimip_ssp585_day.zarr"
+    STATUS_DIR = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/status/{VARIABLE}/{MODEL_NAME}/"
+
+    run_global_bias_adjustment()
