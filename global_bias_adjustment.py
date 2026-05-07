@@ -571,7 +571,7 @@ def run_global_bias_adjustment():
         fs.makedirs(STATUS_DIR)
 
     print(
-        f"Starting global bias adjustment for {VARIABLE} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}..."
+        f"Starting global bias adjustment for {VARIABLE} at {(datetime.now() - timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')}..."
     )
     global_start_time = time.time()
 
