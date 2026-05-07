@@ -279,6 +279,16 @@ def process_chunk(
         target_lats.max(),
     )
 
+    # Drop the bnds dimensions/variables if they exist, as they break xarray_regrid conservative method
+    if "bnds" in cmip_chunk_raw.dims:
+        cmip_chunk_raw = cmip_chunk_raw.drop_dims("bnds")
+    if "lat_bnds" in cmip_chunk_raw.variables:
+        cmip_chunk_raw = cmip_chunk_raw.drop_vars(["lat_bnds"])
+    if "lon_bnds" in cmip_chunk_raw.variables:
+        cmip_chunk_raw = cmip_chunk_raw.drop_vars(["lon_bnds"])
+    if "time_bnds" in cmip_chunk_raw.variables:
+        cmip_chunk_raw = cmip_chunk_raw.drop_vars(["time_bnds"])
+
     # 5. Interpolate CMIP6 to 0.1 degree grid
     print("Interpolating CMIP6...")
     target_grid = xr.Dataset(
@@ -316,6 +326,14 @@ def process_chunk(
     cm_fut_vals = cm_fut.transpose("time", "latitude", "longitude").values.astype(
         np.float32
     )
+
+    if VARIABLE == "pr":
+        # Convert ERA5-Land precipitation from m/day to kg m-2 s-1
+        obs_hist_vals = obs_hist_vals * (1000.0 / 86400.0)
+        # Clip negative precipitation values (often ~ -1e-8 due to numerical inaccuracies)
+        obs_hist_vals = np.clip(obs_hist_vals, 0, None)
+        cm_hist_vals = np.clip(cm_hist_vals, 0, None)
+        cm_fut_vals = np.clip(cm_fut_vals, 0, None)
 
     # 7. Apply ibicus ISIMIP debiaser
     print("Applying ISIMIP debiaser...")
