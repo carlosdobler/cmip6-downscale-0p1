@@ -65,7 +65,7 @@ VARIABLE_CONFIG = {
         "cmip6_var": "tasskew",
         "interpolation": "linear",
     },
-    },
+}
 
 
 # The following variables will be set dynamically in run_global_bias_adjustment
