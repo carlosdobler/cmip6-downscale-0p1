@@ -12,7 +12,7 @@ import numpy as np
 import dask.array as da
 import multiprocessing
 from ibicus.debias import ISIMIP
-from ibicus.variables import tas, pr
+from ibicus.variables import tas, pr, tasrange, tasskew
 from ibicus.utils import get_library_logger
 
 # Prevent OpenBLAS from over-threading
@@ -51,14 +51,27 @@ VARIABLE_CONFIG = {
         "cmip6_var": "pr",
         "interpolation": "conservative",
     },
-}
+    "tasrange": {
+        "ibicus_var": tasrange,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/temperature_2m_range.zarr",
+        "era5_var": "temperature_2m_range",
+        "cmip6_var": "tasrange",
+        "interpolation": "linear",
+    },
+    "tasskew": {
+        "ibicus_var": tasskew,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/temperature_2m_skew.zarr",
+        "era5_var": "temperature_2m_skew",
+        "cmip6_var": "tasskew",
+        "interpolation": "linear",
+    },
+    },
+
 
 # The following variables will be set dynamically in run_global_bias_adjustment
 VARIABLE = None
 VAR_SETTINGS = None
 ERA5_LAND_PATH = None
-CMIP6_HIST_PATH = None
-CMIP6_SSP585_PATH = None
 OUTPUT_ZARR_PATH = None
 STATUS_DIR = None
 
@@ -71,10 +84,24 @@ CHUNK_SIZE = 120
 
 
 # PREPROCESSING HELPERS
-def load_cmip6_aligned(hist_path: str, ssp_path: str) -> xr.Dataset:
+def get_cmip6_path(var_name: str, experiment: str) -> str:
+    """
+    Returns the GCS path for a CMIP6 variable and experiment.
+    """
+    if experiment == "historical":
+        return f"gs://cmip6/CMIP6/CMIP/MPI-M/{MODEL_NAME}/historical/r1i1p1f1/day/{var_name}/gn/v20190710/"
+    else:
+        # Note: Scenarios often use DKRZ node for MPI-ESM1-2-HR
+        return f"gs://cmip6/CMIP6/ScenarioMIP/DKRZ/{MODEL_NAME}/ssp585/r1i1p1f1/day/{var_name}/gn/v20190710/"
+
+
+def load_cmip6_simple(var_name: str) -> xr.Dataset:
     """
     Loads CMIP6 datasets and aligns longitude to -180-180.
     """
+    hist_path = get_cmip6_path(var_name, "historical")
+    ssp_path = get_cmip6_path(var_name, "ssp585")
+    
     ds_hist = xr.open_zarr(hist_path)
     ds_ssp = xr.open_zarr(ssp_path)
     ds = xr.concat([ds_hist, ds_ssp], dim="time").sel(
@@ -83,6 +110,32 @@ def load_cmip6_aligned(hist_path: str, ssp_path: str) -> xr.Dataset:
     # Map 0...360 to -180...180
     ds = ds.assign_coords(lon=(((ds.lon + 180) % 360) - 180))
     return ds.sortby("lon")
+
+
+def load_cmip6_aligned(var_name: str) -> xr.Dataset:
+    """
+    Loads CMIP6 datasets and handles derived variables (Choice B).
+    """
+    if var_name == "tasrange":
+        print("Calculating CMIP6 tasrange on-the-fly...")
+        ds_max = load_cmip6_simple("tasmax")
+        ds_min = load_cmip6_simple("tasmin")
+        # Alignment is handled in load_cmip6_simple, so we can subtract
+        da = ds_max["tasmax"] - ds_min["tasmin"]
+        return da.to_dataset(name="tasrange")
+    
+    elif var_name == "tasskew":
+        print("Calculating CMIP6 tasskew on-the-fly...")
+        ds_max = load_cmip6_simple("tasmax")
+        ds_min = load_cmip6_simple("tasmin")
+        ds_tas = load_cmip6_simple("tas")
+        # Formula: (mean - min) / (max - min)
+        # Use .clip(0, 1) to ensure physical validity despite numerical noise
+        da = (ds_tas["tas"] - ds_min["tasmin"]) / (ds_max["tasmax"] - ds_min["tasmin"])
+        return da.clip(0, 1).to_dataset(name="tasskew")
+    
+    else:
+        return load_cmip6_simple(var_name)
 
 
 def get_cmip6_chunk(
@@ -178,7 +231,7 @@ def initialize_global_zarr():
     ds_temp = xr.open_zarr(ERA5_LAND_PATH)
     lats, lons = ds_temp.y.values, ds_temp.x.values
 
-    ds_cmip = load_cmip6_aligned(CMIP6_HIST_PATH, CMIP6_SSP585_PATH)
+    ds_cmip = load_cmip6_aligned(VAR_SETTINGS["cmip6_var"])
     time_coords = ds_cmip.time
 
     shape = (len(time_coords), len(lats), len(lons))
@@ -267,7 +320,7 @@ def process_chunk(
     obs_chunk = obs_chunk.rename({"y": "latitude", "x": "longitude"})
 
     # 4. Load CMIP6
-    ds_cmip_full = load_cmip6_aligned(CMIP6_HIST_PATH, CMIP6_SSP585_PATH)
+    ds_cmip_full = load_cmip6_aligned(VAR_SETTINGS["cmip6_var"])
     target_lats = land_mask_master.y.isel(y=slice(lat_idx_start, lat_idx_end)).values
     target_lons = land_mask_master.x.isel(x=slice(lon_idx_start, lon_idx_end)).values
 
@@ -636,8 +689,8 @@ if __name__ == "__main__":
         "--variable",
         type=str,
         default="tas",
-        choices=["tas", "pr"],
-        help="Variable to downscale (tas or pr).",
+        choices=["tas", "pr", "tasrange", "tasskew"],
+        help="Variable to downscale (tas, pr, tasrange, or tasskew).",
     )
     args = parser.parse_args()
 
@@ -645,8 +698,8 @@ if __name__ == "__main__":
     VARIABLE = args.variable
     VAR_SETTINGS = VARIABLE_CONFIG[VARIABLE]
     ERA5_LAND_PATH = VAR_SETTINGS["era5_path"]
-    CMIP6_HIST_PATH = f"gs://cmip6/CMIP6/CMIP/MPI-M/{MODEL_NAME}/historical/r1i1p1f1/day/{VAR_SETTINGS['cmip6_var']}/gn/v20190710/"
-    CMIP6_SSP585_PATH = f"gs://cmip6/CMIP6/ScenarioMIP/DKRZ/{MODEL_NAME}/ssp585/r1i1p1f1/day/{VAR_SETTINGS['cmip6_var']}/gn/v20190710/"
+    
+    # OUTPUT_ZARR_PATH is based on the VARIABLE (tas, pr, tasrange, or tasskew)
     OUTPUT_ZARR_PATH = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/daily/{VARIABLE}/{VARIABLE}_{MODEL_NAME}_ww-isimip_ssp585_day.zarr"
     STATUS_DIR = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/status/{VARIABLE}/{MODEL_NAME}/"
 
