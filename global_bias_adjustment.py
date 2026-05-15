@@ -101,7 +101,7 @@ def load_cmip6_simple(var_name: str) -> xr.Dataset:
     """
     hist_path = get_cmip6_path(var_name, "historical")
     ssp_path = get_cmip6_path(var_name, "ssp585")
-    
+
     ds_hist = xr.open_zarr(hist_path)
     ds_ssp = xr.open_zarr(ssp_path)
     ds = xr.concat([ds_hist, ds_ssp], dim="time").sel(
@@ -123,7 +123,7 @@ def load_cmip6_aligned(var_name: str) -> xr.Dataset:
         # Alignment is handled in load_cmip6_simple, so we can subtract
         da = ds_max["tasmax"] - ds_min["tasmin"]
         return da.to_dataset(name="tasrange")
-    
+
     elif var_name == "tasskew":
         print("Calculating CMIP6 tasskew on-the-fly...")
         ds_max = load_cmip6_simple("tasmax")
@@ -133,7 +133,7 @@ def load_cmip6_aligned(var_name: str) -> xr.Dataset:
         # Use .clip(0, 1) to ensure physical validity despite numerical noise
         da = (ds_tas["tas"] - ds_min["tasmin"]) / (ds_max["tasmax"] - ds_min["tasmin"])
         return da.clip(0, 1).to_dataset(name="tasskew")
-    
+
     else:
         return load_cmip6_simple(var_name)
 
@@ -462,15 +462,46 @@ def process_chunk(
     gc.collect()
 
 
-def finalize_longitude_wrap():
+def is_everything_done(expected_count: int) -> bool:
+    """
+    Checks if all chunks are marked as .done in STATUS_DIR.
+    """
+    fs = fsspec.filesystem("gs")
+    # Using glob to get all .done files
+    done_files = fs.glob(f"{STATUS_DIR}*.done")
+    # Filter to count only actual data chunks (names starting with 'lat_')
+    chunk_done_count = sum(
+        1 for f in done_files if os.path.basename(f).startswith("lat_")
+    )
+    return chunk_done_count >= expected_count
+
+
+def finalize_longitude_wrap(total_chunks: int):
     """
     Copies data from longitude index 0 (-180.0) to index 3600 (180.0).
     Executed once all chunks are processed.
     """
     fs = fsspec.filesystem("gs")
     wrap_done_file = f"{STATUS_DIR}longitude_wrap.done"
+    wrap_started_file = f"{STATUS_DIR}longitude_wrap.started"
+
     if fs.exists(wrap_done_file):
         print("Longitude wrap already finalized.")
+        return
+
+    if not is_everything_done(total_chunks):
+        print("Not all chunks are done yet. Skipping longitude wrap for now.")
+        return
+
+    # Atomic lock: create .started file
+    if fs.exists(wrap_started_file):
+        print("Longitude wrap is being processed by another VM.")
+        return
+
+    try:
+        fs.touch(wrap_started_file)
+    except Exception as e:
+        print(f"Failed to lock longitude wrap: {e}")
         return
 
     print("Finalizing longitude wrap (copying index 0 to 3600)...")
@@ -534,18 +565,37 @@ def finalize_longitude_wrap():
         print(f"Wrapped latitude slice {lat_start_idx}:{lat_idx_end}")
 
     fs.touch(wrap_done_file)
+    if fs.exists(wrap_started_file):
+        fs.rm(wrap_started_file)
     print("Longitude wrap complete.")
 
 
-def finalize_south_pole():
+def finalize_south_pole(total_chunks: int):
     """
     Copies data from latitude index 1799 (-89.9) to index 1800 (-90.0)
     ONLY if index 1800 is currently empty (all NaNs).
     """
     fs = fsspec.filesystem("gs")
     pole_done_file = f"{STATUS_DIR}south_pole.done"
+    pole_started_file = f"{STATUS_DIR}south_pole.started"
+
     if fs.exists(pole_done_file):
         print("South pole already finalized.")
+        return
+
+    if not is_everything_done(total_chunks):
+        print("Not all chunks are done yet. Skipping South Pole for now.")
+        return
+
+    # Atomic lock: create .started file
+    if fs.exists(pole_started_file):
+        print("South Pole is being processed by another VM.")
+        return
+
+    try:
+        fs.touch(pole_started_file)
+    except Exception as e:
+        print(f"Failed to lock South Pole: {e}")
         return
 
     print("Checking if South Pole row (index 1800) needs filling...")
@@ -558,6 +608,8 @@ def finalize_south_pole():
     if has_data:
         print("South Pole already has data. Skipping fill.")
         fs.touch(pole_done_file)
+        if fs.exists(pole_started_file):
+            fs.rm(pole_started_file)
         return
 
     print("South Pole (index 1800) is empty. Copying index 1799 to 1800...")
@@ -616,6 +668,8 @@ def finalize_south_pole():
         print(f"Filled South Pole for longitude slice {lon_start_idx}:{lon_idx_end}")
 
     fs.touch(pole_done_file)
+    if fs.exists(pole_started_file):
+        fs.rm(pole_started_file)
     print("South pole finalization complete.")
 
 
@@ -673,10 +727,10 @@ def run_global_bias_adjustment():
             current += 1
 
     # Copy longitude index 0 to index 3600 to complete the global wrap
-    finalize_longitude_wrap()
+    finalize_longitude_wrap(total_chunks)
 
     # Copy latitude index 1799 to index 1800 to fill missing South Pole
-    finalize_south_pole()
+    finalize_south_pole(total_chunks)
 
     total_elapsed = (time.time() - global_start_time) / 3600
     print(f"Global bias adjustment completed in {total_elapsed:.2f} hours.")
@@ -698,7 +752,7 @@ if __name__ == "__main__":
     VARIABLE = args.variable
     VAR_SETTINGS = VARIABLE_CONFIG[VARIABLE]
     ERA5_LAND_PATH = VAR_SETTINGS["era5_path"]
-    
+
     # OUTPUT_ZARR_PATH is based on the VARIABLE (tas, pr, tasrange, or tasskew)
     OUTPUT_ZARR_PATH = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/daily/{VARIABLE}/{VARIABLE}_{MODEL_NAME}_ww-isimip_ssp585_day.zarr"
     STATUS_DIR = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/status/{VARIABLE}/{MODEL_NAME}/"
