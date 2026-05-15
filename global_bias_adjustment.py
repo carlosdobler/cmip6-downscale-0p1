@@ -573,7 +573,7 @@ def finalize_longitude_wrap(total_chunks: int):
 def finalize_south_pole(total_chunks: int):
     """
     Copies data from latitude index 1799 (-89.9) to index 1800 (-90.0)
-    ONLY if index 1800 is currently empty (all NaNs).
+    ONLY if index 1800 is not fully populated (compared to index 1799).
     """
     fs = fsspec.filesystem("gs")
     pole_done_file = f"{STATUS_DIR}south_pole.done"
@@ -601,18 +601,19 @@ def finalize_south_pole(total_chunks: int):
     print("Checking if South Pole row (index 1800) needs filling...")
     ds_out = xr.open_zarr(OUTPUT_ZARR_PATH)
 
-    # Check if index 1800 has any non-NaN data (sample first time step for speed)
-    # We use .any() to see if there is ANY valid data there.
-    has_data = ds_out[VARIABLE].isel(latitude=1800, time=0).notnull().any().values
+    # Check if index 1800 is fully populated by comparing valid pixel counts with row 1799
+    # Sample first time step for speed
+    expected_valid_pixels = int(ds_out[VARIABLE].isel(latitude=1799, time=0).notnull().sum().values)
+    current_valid_pixels = int(ds_out[VARIABLE].isel(latitude=1800, time=0).notnull().sum().values)
 
-    if has_data:
-        print("South Pole already has data. Skipping fill.")
+    if current_valid_pixels >= expected_valid_pixels and expected_valid_pixels > 0:
+        print("South Pole is fully populated. Skipping fill.")
         fs.touch(pole_done_file)
         if fs.exists(pole_started_file):
             fs.rm(pole_started_file)
         return
 
-    print("South Pole (index 1800) is empty. Copying index 1799 to 1800...")
+    print(f"South Pole incomplete (Expected: {expected_valid_pixels}, Found: {current_valid_pixels}). Copying index 1799 to 1800...")
 
     # Process in longitude chunks to stay memory-efficient
     lons_idx = range(0, 3601, CHUNK_SIZE)
@@ -678,8 +679,16 @@ def run_global_bias_adjustment():
 
     # Load land mask
     print("Loading land mask...")
-    ds_temp = xr.open_zarr(ERA5_LAND_PATH)[VAR_SETTINGS["era5_var"]].isel(time=0).load()
-    land_mask = ds_temp != 0.0
+
+    # ALWAYS load the land mask from the reference 'tas' (temperature_2m) variable. 
+    # This prevents issues where derived variables (like 'tasskew') use np.nan instead of 0.0 
+    # as the fill value over the ocean, which would break the mask generation (NaN != 0.0 is True).
+    tas_path = VARIABLE_CONFIG["tas"]["era5_path"]
+    tas_var = VARIABLE_CONFIG["tas"]["era5_var"]
+    ds_temp = xr.open_zarr(tas_path)[tas_var].isel(time=0).load()
+
+    # Ensure it's not exactly 0.0 AND not NaN
+    land_mask = (ds_temp != 0.0) & ds_temp.notnull()
 
     lats_idx = range(0, 1800, CHUNK_SIZE)
     lons_idx = range(0, 3600, CHUNK_SIZE)
