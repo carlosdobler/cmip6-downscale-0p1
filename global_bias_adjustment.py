@@ -744,6 +744,9 @@ def run_global_bias_adjustment():
     total_elapsed = (time.time() - global_start_time) / 3600
     print(f"Global bias adjustment completed in {total_elapsed:.2f} hours.")
 
+    # Clear fsspec instance cache to prevent noise/RuntimeErrors during interpreter shutdown
+    fsspec.AbstractFileSystem.clear_instance_cache()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run global bias adjustment.")
