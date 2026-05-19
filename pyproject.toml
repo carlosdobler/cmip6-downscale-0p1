@@ -1,0 +1,16 @@
+[project]
+name = "cmip6-downscale-0p1"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dask>=2026.3.0",
+    "gcsfs>=2026.4.0",
+    "geedim>=2.0.0",
+    "ibicus>=1.2.0",
+    "numpy>=2.4.4",
+    "xarray>=2026.4.0",
+    "xarray-regrid>=0.4.2",
+    "zarr>=3.1.6",
+]
