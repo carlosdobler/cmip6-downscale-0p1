@@ -21,7 +21,7 @@ os.environ["MKL_NUM_THREADS"] = "1"
 
 # Suppress ibicus logging warnings
 ibicus_logger = get_library_logger()
-ibicus_logger.setLevel(logging.ERROR)
+ibicus_logger.setLevel(logging.CRITICAL)
 
 # Suppress specific ibicus UserWarnings (expected NaNs from masking, and progress bar)
 warnings.filterwarnings(
@@ -396,10 +396,10 @@ def process_chunk(
         cm_fut_vals = np.clip(cm_fut_vals, 0, None)
 
     if VARIABLE == "hurs":
-        # Clip to 0-100 range
-        obs_hist_vals = np.clip(obs_hist_vals, 0, 100)
-        cm_hist_vals = np.clip(cm_hist_vals, 0, 100)
-        cm_fut_vals = np.clip(cm_fut_vals, 0, 100)
+        # Clip to ibicus reasonable physical range for hurs [1e-5, 150]
+        obs_hist_vals = np.clip(obs_hist_vals, 1e-5, 150)
+        cm_hist_vals = np.clip(cm_hist_vals, 1e-5, 150)
+        cm_fut_vals = np.clip(cm_fut_vals, 1e-5, 150)
 
     # 7. Apply ibicus ISIMIP debiaser
     print("Applying ISIMIP debiaser...")
