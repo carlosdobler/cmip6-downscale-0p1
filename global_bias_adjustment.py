@@ -395,6 +395,12 @@ def process_chunk(
         cm_hist_vals = np.clip(cm_hist_vals, 0, None)
         cm_fut_vals = np.clip(cm_fut_vals, 0, None)
 
+    if VARIABLE == "hurs":
+        # Clip to 0-100 range
+        obs_hist_vals = np.clip(obs_hist_vals, 0, 100)
+        cm_hist_vals = np.clip(cm_hist_vals, 0, 100)
+        cm_fut_vals = np.clip(cm_fut_vals, 0, 100)
+
     # 7. Apply ibicus ISIMIP debiaser
     print("Applying ISIMIP debiaser...")
     debiaser = ISIMIP.from_variable(
