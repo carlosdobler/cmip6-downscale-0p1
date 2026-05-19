@@ -68,7 +68,7 @@ VARIABLE_CONFIG = {
     "hurs": {
         "ibicus_var": hurs,
         "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/relative_humidity.zarr",
-        "era5_var": "hurs",
+        "era5_var": "relative_humidity",
         "cmip6_var": "hurs",
         "interpolation": "linear",
     },
