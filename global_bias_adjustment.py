@@ -283,6 +283,8 @@ def process_chunk(
     total_count: int,
     current_idx: int,
     land_mask_master: xr.DataArray,
+    ds_obs_full: xr.DataArray,
+    ds_cmip_full: xr.Dataset,
 ):
     chunk_id = get_chunk_id(lat_idx_start, lon_idx_start)
 
@@ -313,7 +315,6 @@ def process_chunk(
     )
 
     # 3. Load ERA5-Land (observations)
-    ds_obs_full = xr.open_zarr(ERA5_LAND_PATH)[VAR_SETTINGS["era5_var"]]
     # Use index-based slicing for ERA5-Land
     obs_chunk = (
         ds_obs_full.isel(
@@ -327,7 +328,6 @@ def process_chunk(
     obs_chunk = obs_chunk.rename({"y": "latitude", "x": "longitude"})
 
     # 4. Load CMIP6
-    ds_cmip_full = load_cmip6_aligned(VAR_SETTINGS["cmip6_var"])
     target_lats = land_mask_master.y.isel(y=slice(lat_idx_start, lat_idx_end)).values
     target_lons = land_mask_master.x.isel(x=slice(lon_idx_start, lon_idx_end)).values
 
@@ -722,6 +722,10 @@ def run_global_bias_adjustment():
     )
     global_start_time = time.time()
 
+    print("Loading global datasets once to prevent GC/fsspec loop issues...")
+    ds_obs_full = xr.open_zarr(ERA5_LAND_PATH)[VAR_SETTINGS["era5_var"]]
+    ds_cmip_full = load_cmip6_aligned(VAR_SETTINGS["cmip6_var"])
+
     current = 1
     for lat_start_idx in lats_idx:
         for lon_start_idx in lons_idx:
@@ -744,7 +748,13 @@ def run_global_bias_adjustment():
                 continue
 
             process_chunk(
-                lat_start_idx, lon_start_idx, total_chunks, current, land_mask
+                lat_start_idx,
+                lon_start_idx,
+                total_chunks,
+                current,
+                land_mask,
+                ds_obs_full,
+                ds_cmip_full,
             )
             current += 1
 
