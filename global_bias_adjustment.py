@@ -12,7 +12,7 @@ import numpy as np
 import dask.array as da
 import multiprocessing
 from ibicus.debias import ISIMIP
-from ibicus.variables import tas, pr, tasrange, tasskew
+from ibicus.variables import tas, pr, tasrange, tasskew, hurs
 from ibicus.utils import get_library_logger
 
 # Prevent OpenBLAS from over-threading
@@ -63,6 +63,13 @@ VARIABLE_CONFIG = {
         "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/temperature_2m_skew.zarr",
         "era5_var": "temperature_2m_skew",
         "cmip6_var": "tasskew",
+        "interpolation": "linear",
+    },
+    "hurs": {
+        "ibicus_var": hurs,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/relative_humidity.zarr",
+        "era5_var": "hurs",
+        "cmip6_var": "hurs",
         "interpolation": "linear",
     },
 }
@@ -603,8 +610,12 @@ def finalize_south_pole(total_chunks: int):
 
     # Check if index 1800 is fully populated by comparing valid pixel counts with row 1799
     # Sample first time step for speed
-    expected_valid_pixels = int(ds_out[VARIABLE].isel(latitude=1799, time=0).notnull().sum().values)
-    current_valid_pixels = int(ds_out[VARIABLE].isel(latitude=1800, time=0).notnull().sum().values)
+    expected_valid_pixels = int(
+        ds_out[VARIABLE].isel(latitude=1799, time=0).notnull().sum().values
+    )
+    current_valid_pixels = int(
+        ds_out[VARIABLE].isel(latitude=1800, time=0).notnull().sum().values
+    )
 
     if current_valid_pixels >= expected_valid_pixels and expected_valid_pixels > 0:
         print("South Pole is fully populated. Skipping fill.")
@@ -613,7 +624,9 @@ def finalize_south_pole(total_chunks: int):
             fs.rm(pole_started_file)
         return
 
-    print(f"South Pole incomplete (Expected: {expected_valid_pixels}, Found: {current_valid_pixels}). Copying index 1799 to 1800...")
+    print(
+        f"South Pole incomplete (Expected: {expected_valid_pixels}, Found: {current_valid_pixels}). Copying index 1799 to 1800..."
+    )
 
     # Process in longitude chunks to stay memory-efficient
     lons_idx = range(0, 3601, CHUNK_SIZE)
@@ -680,8 +693,8 @@ def run_global_bias_adjustment():
     # Load land mask
     print("Loading land mask...")
 
-    # ALWAYS load the land mask from the reference 'tas' (temperature_2m) variable. 
-    # This prevents issues where derived variables (like 'tasskew') use np.nan instead of 0.0 
+    # ALWAYS load the land mask from the reference 'tas' (temperature_2m) variable.
+    # This prevents issues where derived variables (like 'tasskew') use np.nan instead of 0.0
     # as the fill value over the ocean, which would break the mask generation (NaN != 0.0 is True).
     tas_path = VARIABLE_CONFIG["tas"]["era5_path"]
     tas_var = VARIABLE_CONFIG["tas"]["era5_var"]
@@ -755,8 +768,8 @@ if __name__ == "__main__":
         "--variable",
         type=str,
         default="tas",
-        choices=["tas", "pr", "tasrange", "tasskew"],
-        help="Variable to downscale (tas, pr, tasrange, or tasskew).",
+        choices=["tas", "pr", "tasrange", "tasskew", "hurs"],
+        help="Variable to downscale (tas, pr, tasrange, tasskew, or hurs).",
     )
     args = parser.parse_args()
 
