@@ -30,6 +30,9 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     "ignore", message=".*progressbar argument is ignored.*", category=UserWarning
 )
+warnings.filterwarnings(
+    "ignore", message="divide by zero encountered in divide", category=RuntimeWarning
+)
 
 
 # CONFIGURATION
