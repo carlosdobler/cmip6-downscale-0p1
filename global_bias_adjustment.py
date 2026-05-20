@@ -12,7 +12,7 @@ import numpy as np
 import dask.array as da
 import multiprocessing
 from ibicus.debias import ISIMIP
-from ibicus.variables import tas, pr, tasrange, tasskew, hurs
+from ibicus.variables import tas, pr, tasrange, tasskew, hurs, rsds
 from ibicus.utils import get_library_logger
 
 # Prevent OpenBLAS from over-threading
@@ -71,6 +71,13 @@ VARIABLE_CONFIG = {
         "era5_var": "relative_humidity",
         "cmip6_var": "hurs",
         "interpolation": "linear",
+    },
+    "rsds": {
+        "ibicus_var": rsds,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/surface_solar_radiation_downwards_sum.zarr",
+        "era5_var": "surface_solar_radiation_downwards_sum",
+        "cmip6_var": "rsds",
+        "interpolation": "conservative",
     },
 }
 
@@ -400,6 +407,15 @@ def process_chunk(
         obs_hist_vals = np.clip(obs_hist_vals, 1e-5, 150)
         cm_hist_vals = np.clip(cm_hist_vals, 1e-5, 150)
         cm_fut_vals = np.clip(cm_fut_vals, 1e-5, 150)
+
+    if VARIABLE == "rsds":
+        # Convert ERA5-Land radiation sum (J m-2) to daily mean flux (W m-2)
+        # 1 day = 86400 seconds
+        obs_hist_vals = obs_hist_vals / 86400.0
+        # Clip to ibicus reasonable physical range for rsds [0, 1000]
+        obs_hist_vals = np.clip(obs_hist_vals, 0, 1000)
+        cm_hist_vals = np.clip(cm_hist_vals, 0, 1000)
+        cm_fut_vals = np.clip(cm_fut_vals, 0, 1000)
 
     # 7. Apply ibicus ISIMIP debiaser
     print("Applying ISIMIP debiaser...")
@@ -784,8 +800,8 @@ if __name__ == "__main__":
         "--variable",
         type=str,
         default="tas",
-        choices=["tas", "pr", "tasrange", "tasskew", "hurs"],
-        help="Variable to downscale (tas, pr, tasrange, tasskew, or hurs).",
+        choices=["tas", "pr", "tasrange", "tasskew", "hurs", "rsds"],
+        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, or rsds).",
     )
     args = parser.parse_args()
 
