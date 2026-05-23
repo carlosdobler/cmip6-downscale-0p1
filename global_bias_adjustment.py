@@ -418,6 +418,13 @@ def process_chunk(
         cm_hist_vals = np.clip(cm_hist_vals, 1e-5, 150)
         cm_fut_vals = np.clip(cm_fut_vals, 1e-5, 150)
 
+    if VARIABLE == "sfcwind":
+        # Clip to ibicus reasonable physical range for sfcwind [1e-5, 500]
+        # This prevents warnings when wind speed is 0.0
+        obs_hist_vals = np.clip(obs_hist_vals, 1e-5, 500)
+        cm_hist_vals = np.clip(cm_hist_vals, 1e-5, 500)
+        cm_fut_vals = np.clip(cm_fut_vals, 1e-5, 500)
+
     if VARIABLE == "rsds":
         # Convert ERA5-Land radiation sum (J m-2) to daily mean flux (W m-2)
         # 1 day = 86400 seconds
