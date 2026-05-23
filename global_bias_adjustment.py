@@ -12,7 +12,7 @@ import numpy as np
 import dask.array as da
 import multiprocessing
 from ibicus.debias import ISIMIP
-from ibicus.variables import tas, pr, tasrange, tasskew, hurs, rsds
+from ibicus.variables import tas, pr, tasrange, tasskew, hurs, rsds, sfcwind
 from ibicus.utils import get_library_logger
 
 # Prevent OpenBLAS from over-threading
@@ -81,6 +81,13 @@ VARIABLE_CONFIG = {
         "era5_var": "surface_solar_radiation_downwards_sum",
         "cmip6_var": "rsds",
         "interpolation": "conservative",
+    },
+    "sfcwind": {
+        "ibicus_var": sfcwind,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/wind_speed_10m.zarr",
+        "era5_var": "wind_speed",
+        "cmip6_var": "sfcWind",
+        "interpolation": "linear",
     },
 }
 
@@ -803,8 +810,8 @@ if __name__ == "__main__":
         "--variable",
         type=str,
         default="tas",
-        choices=["tas", "pr", "tasrange", "tasskew", "hurs", "rsds"],
-        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, or rsds).",
+        choices=["tas", "pr", "tasrange", "tasskew", "hurs", "rsds", "sfcwind"],
+        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, rsds, or sfcwind).",
     )
     args = parser.parse_args()
 
