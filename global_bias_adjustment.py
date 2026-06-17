@@ -75,6 +75,13 @@ VARIABLE_CONFIG = {
         "cmip6_var": "hurs",
         "interpolation": "linear",
     },
+    "hursmin": {
+        "ibicus_var": hurs,
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/relative_humidity_min.zarr",
+        "era5_var": "relative_humidity_min",
+        "cmip6_var": "hursmin",
+        "interpolation": "linear",
+    },
     "rsds": {
         "ibicus_var": rsds,
         "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/surface_solar_radiation_downwards_sum.zarr",
@@ -157,6 +164,23 @@ def load_cmip6_aligned(var_name: str) -> xr.Dataset:
         # Use .clip(0, 1) to ensure physical validity despite numerical noise
         da = (ds_tas["tas"] - ds_min["tasmin"]) / (ds_max["tasmax"] - ds_min["tasmin"])
         return da.clip(0, 1).to_dataset(name="tasskew")
+
+    elif var_name == "hursmin":
+        print("Calculating CMIP6 hursmin on-the-fly...")
+        ds_max = load_cmip6_simple("tasmax")
+        ds_min = load_cmip6_simple("tasmin")
+        
+        t_c = ds_max["tasmax"] - 273.15
+        td_c = ds_min["tasmin"] - 273.15
+        
+        a = 17.625
+        b = 243.04
+        
+        # RH = 100 * exp((a * Td) / (b + Td) - (a * T) / (b + T))
+        rh = 100 * np.exp((a * td_c) / (b + td_c) - (a * t_c) / (b + t_c))
+        
+        # Clip RH to [0, 100] as relative humidity cannot be negative or exceed 100%
+        return rh.clip(0, 100).to_dataset(name="hursmin")
 
     else:
         return load_cmip6_simple(var_name)
@@ -412,7 +436,7 @@ def process_chunk(
         cm_hist_vals = np.clip(cm_hist_vals, 0, None)
         cm_fut_vals = np.clip(cm_fut_vals, 0, None)
 
-    if VARIABLE == "hurs":
+    if VARIABLE in ["hurs", "hursmin"]:
         # Clip to ibicus reasonable physical range for hurs [1e-5, 150]
         obs_hist_vals = np.clip(obs_hist_vals, 1e-5, 150)
         cm_hist_vals = np.clip(cm_hist_vals, 1e-5, 150)
@@ -817,8 +841,8 @@ if __name__ == "__main__":
         "--variable",
         type=str,
         default="tas",
-        choices=["tas", "pr", "tasrange", "tasskew", "hurs", "rsds", "sfcwind"],
-        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, rsds, or sfcwind).",
+        choices=["tas", "pr", "tasrange", "tasskew", "hurs", "hursmin", "rsds", "sfcwind"],
+        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, hursmin, rsds, or sfcwind).",
     )
     args = parser.parse_args()
 
