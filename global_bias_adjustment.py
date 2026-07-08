@@ -166,19 +166,33 @@ def load_cmip6_aligned(var_name: str) -> xr.Dataset:
         return da.clip(0, 1).to_dataset(name="tasskew")
 
     elif var_name == "hursmin":
+        # tasmin is used here as a substitute of dewpoint/min_dewpoint. Daily tasmin is readily
+        # available in CMIP6.
+        # Daily tasmin serves as a meteorological proxy for both average and minimum dewpoint. This
+        # substitution relies on the principle that nighttime cooling frequently causes the lower
+        # atmosphere to reach saturation, bringing the air temperature down to equal the dewpoint.
+        # Since the absolute water vapor content of an air mass typically remains conservative
+        # throughout a 24-hour cycle, this overnight baseline adequately represents the daytime
+        # moisture levels as well (i.e., dewpoint is relatively constant throughout the day). By
+        # plugging tasmin into the numerator of the relative humidity equation, we can reliably
+        # estimate the daily actual vapor pressure without needing a specifically measured minimum
+        # dewpoint.
+        # Note: this approach may overestimate humidity in arid climates where nighttime saturation
+        # is rare.
+
         print("Calculating CMIP6 hursmin on-the-fly...")
         ds_max = load_cmip6_simple("tasmax")
         ds_min = load_cmip6_simple("tasmin")
-        
+
         t_c = ds_max["tasmax"] - 273.15
         td_c = ds_min["tasmin"] - 273.15
-        
+
         a = 17.625
         b = 243.04
-        
+
         # RH = 100 * exp((a * Td) / (b + Td) - (a * T) / (b + T))
         rh = 100 * np.exp((a * td_c) / (b + td_c) - (a * t_c) / (b + t_c))
-        
+
         # Clip RH to [0, 100] as relative humidity cannot be negative or exceed 100%
         return rh.clip(0, 100).to_dataset(name="hursmin")
 
@@ -841,7 +855,16 @@ if __name__ == "__main__":
         "--variable",
         type=str,
         default="tas",
-        choices=["tas", "pr", "tasrange", "tasskew", "hurs", "hursmin", "rsds", "sfcwind"],
+        choices=[
+            "tas",
+            "pr",
+            "tasrange",
+            "tasskew",
+            "hurs",
+            "hursmin",
+            "rsds",
+            "sfcwind",
+        ],
         help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, hursmin, rsds, or sfcwind).",
     )
     args = parser.parse_args()
