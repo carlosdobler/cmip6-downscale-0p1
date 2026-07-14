@@ -11,6 +11,7 @@ import fsspec
 import numpy as np
 import dask.array as da
 import multiprocessing
+import yaml
 from ibicus.debias import ISIMIP
 from ibicus.variables import tas, pr, tasrange, tasskew, hurs, rsds, sfcwind
 from ibicus.utils import get_library_logger
@@ -37,7 +38,17 @@ warnings.filterwarnings(
 
 # CONFIGURATION
 WORKERS = 47
-MODEL_NAME = "MPI-ESM1-2-HR"
+MODEL_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "model_registry.yaml")
+
+
+def load_model_registry(path: str = MODEL_REGISTRY_PATH) -> dict:
+    """
+    Loads the model registry YAML file mapping model aliases (lowercased
+    full CMIP6 model names) to their GCS path metadata.
+    """
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
 
 VARIABLE_CONFIG = {
     "tas": {
@@ -105,6 +116,8 @@ VAR_SETTINGS = None
 ERA5_LAND_PATH = None
 OUTPUT_ZARR_PATH = None
 STATUS_DIR = None
+MODEL_CONFIG = None
+MODEL_NAME = None
 
 # TIME RANGES
 TRAIN_START, TRAIN_END = "1971-01-01", "2010-12-31"
@@ -120,10 +133,19 @@ def get_cmip6_path(var_name: str, experiment: str) -> str:
     Returns the GCS path for a CMIP6 variable and experiment.
     """
     if experiment == "historical":
-        return f"gs://cmip6/CMIP6/CMIP/MPI-M/{MODEL_NAME}/historical/r1i1p1f1/day/{var_name}/gn/v20190710/"
+        activity = "CMIP"
+        institution = MODEL_CONFIG["institution_hist"]
+        version = MODEL_CONFIG["version_hist"]
     else:
-        # Note: Scenarios often use DKRZ node for MPI-ESM1-2-HR
-        return f"gs://cmip6/CMIP6/ScenarioMIP/DKRZ/{MODEL_NAME}/ssp585/r1i1p1f1/day/{var_name}/gn/v20190710/"
+        activity = "ScenarioMIP"
+        institution = MODEL_CONFIG["institution_ssp"]
+        version = MODEL_CONFIG["version_ssp"]
+
+    return (
+        f"gs://cmip6/CMIP6/{activity}/{institution}/{MODEL_NAME}/{experiment}/"
+        f"{MODEL_CONFIG['ensemble_member']}/day/{var_name}/"
+        f"{MODEL_CONFIG['grid_label']}/{version}/"
+    )
 
 
 def load_cmip6_simple(var_name: str) -> xr.Dataset:
@@ -849,6 +871,8 @@ def run_global_bias_adjustment():
 
 
 if __name__ == "__main__":
+    model_registry = load_model_registry()
+
     parser = argparse.ArgumentParser(description="Run global bias adjustment.")
     parser.add_argument(
         "-v",
@@ -867,12 +891,27 @@ if __name__ == "__main__":
         ],
         help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, hursmin, rsds, or sfcwind).",
     )
+    parser.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        required=True,
+        choices=list(model_registry.keys()),
+        help=(
+            "CMIP6 model to downscale, as a key in model_registry.yaml "
+            "(the full model name, lowercased). Use add_cmip6_model.py to "
+            "register a new model."
+        ),
+    )
     args = parser.parse_args()
 
     # Set dynamic variables globally
     VARIABLE = args.variable
     VAR_SETTINGS = VARIABLE_CONFIG[VARIABLE]
     ERA5_LAND_PATH = VAR_SETTINGS["era5_path"]
+
+    MODEL_CONFIG = model_registry[args.model]
+    MODEL_NAME = MODEL_CONFIG["model_name"]
 
     # OUTPUT_ZARR_PATH is based on the VARIABLE (tas, pr, tasrange, or tasskew)
     OUTPUT_ZARR_PATH = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/daily/{VARIABLE}/{VARIABLE}_{MODEL_NAME}_ww-isimip_ssp585_day.zarr"

@@ -1,0 +1,33 @@
+# Registry of CMIP6 models used by global_bias_adjustment.py.
+#
+# Each top-level key is a model alias (always the full CMIP6 model name,
+# lowercased) used as the --model CLI argument value. Entries are managed
+# by hand or via add_cmip6_model.py, which discovers new entries by
+# scanning gs://cmip6/CMIP6/... on GCS.
+#
+# Fields:
+#   model_name:        Full CMIP6 model name (as published on GCS).
+#   institution_hist:  Institution/node directory for the "historical" experiment.
+#   institution_ssp:   Institution/node directory for the "ssp585" experiment.
+#   ensemble_member:   Ensemble member id (e.g. r1i1p1f1).
+#   grid_label:        Grid label (e.g. gn, gr).
+#   version_hist:      Data version for the "historical" experiment (e.g. v20190710).
+#   version_ssp:       Data version for the "ssp585" experiment.
+
+mpi-esm1-2-hr:
+  model_name: MPI-ESM1-2-HR
+  institution_hist: MPI-M
+  institution_ssp: DKRZ
+  ensemble_member: r1i1p1f1
+  grid_label: gn
+  version_hist: v20190710
+  version_ssp: v20190710
+
+gfdl-esm4:
+  model_name: GFDL-ESM4
+  institution_hist: NOAA-GFDL
+  institution_ssp: NOAA-GFDL
+  ensemble_member: r1i1p1f1
+  grid_label: gr1
+  version_hist: v20190726
+  version_ssp: v20180701

@@ -6,10 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "dask>=2026.3.0",
-    "gcsfs>=2026.4.0",
+    "distributed>=2026.3.0",
+    "gcsfs>=2026.3.0",
     "geedim>=2.0.0",
     "ibicus>=1.2.0",
-    "numpy>=2.4.4",
+    "matplotlib>=3.10.8",
+    "netcdf4>=1.7.4",
+    "pyyaml>=6.0.3",
+    "rioxarray>=0.22.0",
+    "scikit-learn>=1.8.0",
     "xarray>=2026.4.0",
     "xarray-regrid>=0.4.2",
     "zarr>=3.1.6",
