@@ -918,3 +918,9 @@ if __name__ == "__main__":
     STATUS_DIR = f"gs://clim_data_reg_useast1/cmip6_downscaled_woodwell/status/{VARIABLE}/{MODEL_NAME}/"
 
     run_global_bias_adjustment()
+
+    # Skip Python's normal interpreter shutdown/weakref cleanup, which can
+    # otherwise raise a spurious RuntimeError from gcsfs/aiohttp trying to
+    # close an async session on the wrong event loop. All output has
+    # already been written and flushed by this point.
+    os._exit(0)
