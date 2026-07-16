@@ -337,7 +337,9 @@ def initialize_global_zarr():
     for var in ds_out.data_vars:
         ds_out[var].encoding["fill_value"] = np.nan
 
-    ds_out.to_zarr(OUTPUT_ZARR_PATH, compute=False, mode="w", zarr_format=3)
+    ds_out.to_zarr(
+        OUTPUT_ZARR_PATH, compute=False, mode="w", zarr_format=3, consolidated=False
+    )
     print("Initialization complete.")
 
 
@@ -547,6 +549,7 @@ def process_chunk(
             "longitude": slice(lon_idx_start, lon_idx_end),
         },
         zarr_format=3,
+        consolidated=False,
     )
 
     mark_chunk_done(chunk_id)
@@ -667,6 +670,7 @@ def finalize_longitude_wrap(total_chunks: int):
                 "longitude": slice(3600, 3601),
             },
             zarr_format=3,
+            consolidated=False,
         )
         print(f"Wrapped latitude slice {lat_start_idx}:{lat_idx_end}")
 
@@ -777,6 +781,7 @@ def finalize_south_pole(total_chunks: int):
                 "longitude": slice(lon_start_idx, lon_idx_end),
             },
             zarr_format=3,
+            consolidated=False,
         )
         print(f"Filled South Pole for longitude slice {lon_start_idx}:{lon_idx_end}")
 

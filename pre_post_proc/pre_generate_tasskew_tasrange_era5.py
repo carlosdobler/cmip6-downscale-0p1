@@ -38,12 +38,15 @@ def generate_derived():
         ds_range[var].encoding.pop("chunks", None)
 
     print(f"Saving range to {RANGE_OUT}...")
-    ds_range.to_zarr(RANGE_OUT, mode="w")
+    ds_range.to_zarr(RANGE_OUT, mode="w", consolidated=False)
 
     print("Calculating tasskew...")
     # Formula: skew = (mean - min) / (max - min)
     # We clip to [0, 1] to handle floating point noise where mean might be
     # slightly outside min/max bounds due to aggregation methods
+    # A runtime warning ("invalid value encountered in divide") will pop up
+    # due to ocean cells (zeroes, which leads to range being zero, which
+    # is an invalid denominator)
     da_skew = ((da_tas - da_min) / da_range).clip(0, 1).astype("float32")
     ds_skew = da_skew.to_dataset(name="temperature_2m_skew")
     ds_skew = ds_skew.assign_coords(ds_tas.coords)
@@ -52,7 +55,7 @@ def generate_derived():
         ds_skew[var].encoding.pop("chunks", None)
 
     print(f"Saving skew to {SKEW_OUT}...")
-    ds_skew.to_zarr(SKEW_OUT, mode="w")
+    ds_skew.to_zarr(SKEW_OUT, mode="w", consolidated=False)
     print("Done.")
 
 
