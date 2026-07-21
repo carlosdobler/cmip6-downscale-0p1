@@ -140,6 +140,15 @@ CHUNK_SIZE = 120
 
 
 # PREPROCESSING HELPERS
+# Most daily CMIP6 variables live under the "day" MIP table. A handful of
+# variables are only defined in other daily tables per the CMOR table
+# specification -- e.g. "ps" (surface air pressure) is part of "CFday", not
+# "day". Look up the correct table here instead of hard-coding "day".
+MIP_TABLE_OVERRIDES = {
+    "ps": "CFday",
+}
+
+
 def get_cmip6_path(var_name: str, experiment: str) -> str:
     """
     Returns the GCS path for a CMIP6 variable and experiment.
@@ -153,9 +162,11 @@ def get_cmip6_path(var_name: str, experiment: str) -> str:
         institution = MODEL_CONFIG["institution_ssp"]
         version = MODEL_CONFIG["version_ssp"]
 
+    mip_table = MIP_TABLE_OVERRIDES.get(var_name, "day")
+
     return (
         f"gs://cmip6/CMIP6/{activity}/{institution}/{MODEL_NAME}/{experiment}/"
-        f"{MODEL_CONFIG['ensemble_member']}/day/{var_name}/"
+        f"{MODEL_CONFIG['ensemble_member']}/{mip_table}/{var_name}/"
         f"{MODEL_CONFIG['grid_label']}/{version}/"
     )
 
