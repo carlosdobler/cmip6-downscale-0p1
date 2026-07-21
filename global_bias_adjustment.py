@@ -107,6 +107,18 @@ VARIABLE_CONFIG = {
         "cmip6_var": "sfcWind",
         "interpolation": "linear",
     },
+    "ps": {
+        # ibicus has no dedicated Variable object for surface pressure, but its
+        # string-to-Variable mapping aliases "ps" to the "psl" (sea-level pressure)
+        # settings (normal distribution, unbounded, additive trend preservation),
+        # which is an appropriate parametric quantile-mapping choice for a smooth,
+        # continuous pressure field.
+        "ibicus_var": "ps",
+        "era5_path": "gs://clim_data_reg_useast1/era5_land/daily_aggregates/surface_pressure.zarr",
+        "era5_var": "surface_pressure",
+        "cmip6_var": "ps",
+        "interpolation": "linear",
+    },
 }
 
 
@@ -893,8 +905,9 @@ if __name__ == "__main__":
             "hursmin",
             "rsds",
             "sfcwind",
+            "ps",
         ],
-        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, hursmin, rsds, or sfcwind).",
+        help="Variable to downscale (tas, pr, tasrange, tasskew, hurs, hursmin, rsds, sfcwind, or ps).",
     )
     parser.add_argument(
         "-m",
