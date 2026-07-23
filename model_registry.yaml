@@ -31,3 +31,12 @@ gfdl-esm4:
   grid_label: gr1
   version_hist: v20190726
   version_ssp: v20180701
+
+ipsl-cm6a-lr:
+  model_name: IPSL-CM6A-LR
+  institution_hist: IPSL
+  institution_ssp: IPSL
+  ensemble_member: r1i1p1f1
+  grid_label: gr
+  version_hist: v20190614
+  version_ssp: v20190903
