@@ -1,6 +1,7 @@
 import argparse
 import os
 import gc
+import re
 import time
 import logging
 import warnings
@@ -149,25 +150,77 @@ MIP_TABLE_OVERRIDES = {
 }
 
 
+VERSION_PATTERN = re.compile(r"^v(\d{8})$")
+
+# Cache of discovered versions, keyed by (activity, institution, experiment,
+# ensemble, mip_table, grid, var_name), since scanning GCS for available
+# versions is relatively slow and the same combination may be looked up more
+# than once (e.g. tasmax/tasmin reused for derived variables).
+_LATEST_VERSION_CACHE = {}
+
+
+def get_latest_version(
+    activity: str,
+    institution: str,
+    experiment: str,
+    ensemble: str,
+    mip_table: str,
+    grid: str,
+    var_name: str,
+) -> str:
+    """
+    Scans GCS for the available data versions of a given
+    activity/institution/model/experiment/ensemble/mip_table/variable/grid
+    combination and returns the latest one.
+
+    Versions are not stored in the model registry because they can vary not
+    only between the "historical" and "ssp585" experiments, but also across
+    variables within the same experiment.
+    """
+    cache_key = (activity, institution, experiment, ensemble, mip_table, grid, var_name)
+    if cache_key in _LATEST_VERSION_CACHE:
+        return _LATEST_VERSION_CACHE[cache_key]
+
+    path = (
+        f"gs://cmip6/CMIP6/{activity}/{institution}/{MODEL_NAME}/{experiment}/"
+        f"{ensemble}/{mip_table}/{var_name}/{grid}"
+    )
+    fs = fsspec.filesystem("gs")
+    versions = [
+        os.path.basename(entry.rstrip("/")) for entry in fs.ls(path, detail=False)
+    ]
+    versions = [v for v in versions if VERSION_PATTERN.match(v)]
+
+    if not versions:
+        raise RuntimeError(f"No date-stamped version directories found under '{path}'.")
+
+    latest = sorted(versions)[-1]
+    _LATEST_VERSION_CACHE[cache_key] = latest
+    return latest
+
+
 def get_cmip6_path(var_name: str, experiment: str) -> str:
     """
-    Returns the GCS path for a CMIP6 variable and experiment.
+    Returns the GCS path for a CMIP6 variable and experiment, scanning GCS
+    to determine the latest available version.
     """
     if experiment == "historical":
         activity = "CMIP"
         institution = MODEL_CONFIG["institution_hist"]
-        version = MODEL_CONFIG["version_hist"]
     else:
         activity = "ScenarioMIP"
         institution = MODEL_CONFIG["institution_ssp"]
-        version = MODEL_CONFIG["version_ssp"]
 
+    ensemble = MODEL_CONFIG["ensemble_member"]
+    grid = MODEL_CONFIG["grid_label"]
     mip_table = MIP_TABLE_OVERRIDES.get(var_name, "day")
+    version = get_latest_version(
+        activity, institution, experiment, ensemble, mip_table, grid, var_name
+    )
 
     return (
         f"gs://cmip6/CMIP6/{activity}/{institution}/{MODEL_NAME}/{experiment}/"
-        f"{MODEL_CONFIG['ensemble_member']}/{mip_table}/{var_name}/"
-        f"{MODEL_CONFIG['grid_label']}/{version}/"
+        f"{ensemble}/{mip_table}/{var_name}/{grid}/{version}/"
     )
 
 

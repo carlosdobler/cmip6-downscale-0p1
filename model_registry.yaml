@@ -11,8 +11,12 @@
 #   institution_ssp:   Institution/node directory for the "ssp585" experiment.
 #   ensemble_member:   Ensemble member id (e.g. r1i1p1f1).
 #   grid_label:        Grid label (e.g. gn, gr).
-#   version_hist:      Data version for the "historical" experiment (e.g. v20190710).
-#   version_ssp:       Data version for the "ssp585" experiment.
+#
+# Data versions are intentionally NOT stored here: they can vary not only
+# between the "historical" and "ssp585" experiments but also across
+# variables within the same experiment. global_bias_adjustment.py scans GCS
+# at runtime (see get_latest_version()) and picks the latest available
+# version per experiment/variable combination.
 
 mpi-esm1-2-hr:
   model_name: MPI-ESM1-2-HR
@@ -20,8 +24,6 @@ mpi-esm1-2-hr:
   institution_ssp: DKRZ
   ensemble_member: r1i1p1f1
   grid_label: gn
-  version_hist: v20190710
-  version_ssp: v20190710
 
 gfdl-esm4:
   model_name: GFDL-ESM4
@@ -29,8 +31,6 @@ gfdl-esm4:
   institution_ssp: NOAA-GFDL
   ensemble_member: r1i1p1f1
   grid_label: gr1
-  version_hist: v20190726
-  version_ssp: v20180701
 
 ipsl-cm6a-lr:
   model_name: IPSL-CM6A-LR
@@ -38,5 +38,3 @@ ipsl-cm6a-lr:
   institution_ssp: IPSL
   ensemble_member: r1i1p1f1
   grid_label: gr
-  version_hist: v20190614
-  version_ssp: v20190903
