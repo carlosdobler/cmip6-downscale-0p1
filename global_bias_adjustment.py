@@ -494,15 +494,31 @@ def process_chunk(
         target_lats.max(),
     )
 
-    # Drop the bnds dimensions/variables if they exist, as they break xarray_regrid conservative method
-    if "bnds" in cmip_chunk_raw.dims:
-        cmip_chunk_raw = cmip_chunk_raw.drop_dims("bnds")
-    if "lat_bnds" in cmip_chunk_raw.variables:
-        cmip_chunk_raw = cmip_chunk_raw.drop_vars(["lat_bnds"])
-    if "lon_bnds" in cmip_chunk_raw.variables:
-        cmip_chunk_raw = cmip_chunk_raw.drop_vars(["lon_bnds"])
-    if "time_bnds" in cmip_chunk_raw.variables:
-        cmip_chunk_raw = cmip_chunk_raw.drop_vars(["time_bnds"])
+    # Drop the bnds/bounds dimensions and variables if they exist, as they break
+    # xarray_regrid's conservative method. Bounds naming is not consistent across
+    # CMIP6 models: e.g. most use dim "bnds" + vars "lat_bnds"/"lon_bnds"/"time_bnds",
+    # but IPSL-CM6A-LR uses dim "axis_nbounds" + var "time_bounds". Rather than
+    # hard-coding every naming convention, drop any dimension/variable whose name
+    # contains "bnds"/"bounds", plus any leftover non-index variable with a
+    # datetime64 dtype (which conservative regridding cannot average).
+    bounds_dims = [
+        d for d in cmip_chunk_raw.dims if "bnds" in d.lower() or "bounds" in d.lower()
+    ]
+    if bounds_dims:
+        cmip_chunk_raw = cmip_chunk_raw.drop_dims(bounds_dims)
+    bounds_vars = [
+        v
+        for v in cmip_chunk_raw.variables
+        if v not in cmip_chunk_raw.dims
+        and ("bnds" in v.lower() or "bounds" in v.lower())
+    ]
+    if bounds_vars:
+        cmip_chunk_raw = cmip_chunk_raw.drop_vars(bounds_vars)
+    datetime_vars = [
+        v for v in cmip_chunk_raw.data_vars if cmip_chunk_raw[v].dtype.kind == "M"
+    ]
+    if datetime_vars:
+        cmip_chunk_raw = cmip_chunk_raw.drop_vars(datetime_vars)
 
     # 5. Interpolate CMIP6 to 0.1 degree grid
     print("Interpolating CMIP6...")
