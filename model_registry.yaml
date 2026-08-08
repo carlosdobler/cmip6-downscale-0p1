@@ -38,3 +38,10 @@ ipsl-cm6a-lr:
   institution_ssp: IPSL
   ensemble_member: r1i1p1f1
   grid_label: gr
+
+mri-esm2-0:
+  model_name: MRI-ESM2-0
+  institution_hist: MRI
+  institution_ssp: MRI
+  ensemble_member: r1i1p1f1
+  grid_label: gn
