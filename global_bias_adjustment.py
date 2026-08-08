@@ -7,6 +7,7 @@ import logging
 import warnings
 from datetime import datetime, timedelta
 import xarray as xr
+from xarray.coders import CFDatetimeCoder
 import xarray_regrid
 import fsspec
 import numpy as np
@@ -231,8 +232,17 @@ def load_cmip6_simple(var_name: str) -> xr.Dataset:
     hist_path = get_cmip6_path(var_name, "historical")
     ssp_path = get_cmip6_path(var_name, "ssp585")
 
-    ds_hist = xr.open_zarr(hist_path)
-    ds_ssp = xr.open_zarr(ssp_path)
+    # Some models' ssp585 runs (e.g. IPSL-CM6A-LR, extended to 2300) have time
+    # values beyond the nanosecond datetime64 range (~2262), which forces
+    # xarray's default decoder to fall back to cftime objects for that dataset
+    # only. Concatenating a datetime64-indexed historical dataset with a
+    # cftime-indexed ssp dataset yields a mixed/object time index that breaks
+    # string-based .sel(time=slice(...)) downstream. Decoding at second
+    # resolution keeps both datasets as real datetime64 (valid to ~year
+    # 292,000), avoiding the cftime fallback entirely.
+    time_coder = CFDatetimeCoder(time_unit="s")
+    ds_hist = xr.open_zarr(hist_path, decode_times=time_coder)
+    ds_ssp = xr.open_zarr(ssp_path, decode_times=time_coder)
     ds = xr.concat([ds_hist, ds_ssp], dim="time").sel(
         time=slice(INFER_START, INFER_END)
     )
