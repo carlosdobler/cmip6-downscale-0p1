@@ -137,6 +137,24 @@ MODEL_NAME = None
 TRAIN_START, TRAIN_END = "1971-01-01", "2010-12-31"
 INFER_START, INFER_END = "1961-01-01", "2099-12-31"
 
+
+def calendar_safe_time_bound(time_da: xr.DataArray, date_str: str) -> str:
+    """
+    Adjusts an ISO date string so it is valid for the calendar used by
+    `time_da`. Some CMIP6 models (e.g. UKESM1-0-LL) use a 360_day calendar,
+    where every month has exactly 30 days, so day-31 cutoff dates like
+    "2099-12-31" don't exist and raise a ValueError when used as an
+    xarray/pandas time slice bound (ds.time.dt.calendar reports the calendar
+    for both cftime- and datetime64-backed time coordinates). Clamp the
+    day-of-month to the calendar's actual maximum instead.
+    """
+    if time_da.dt.calendar == "360_day":
+        year, month, day = date_str.split("-")
+        day = min(int(day), 30)
+        return f"{year}-{month}-{day:02d}"
+    return date_str
+
+
 # CHUNKING
 CHUNK_SIZE = 120
 
@@ -243,8 +261,12 @@ def load_cmip6_simple(var_name: str) -> xr.Dataset:
     time_coder = CFDatetimeCoder(time_unit="s")
     ds_hist = xr.open_zarr(hist_path, decode_times=time_coder)
     ds_ssp = xr.open_zarr(ssp_path, decode_times=time_coder)
-    ds = xr.concat([ds_hist, ds_ssp], dim="time").sel(
-        time=slice(INFER_START, INFER_END)
+    ds = xr.concat([ds_hist, ds_ssp], dim="time")
+    ds = ds.sel(
+        time=slice(
+            calendar_safe_time_bound(ds.time, INFER_START),
+            calendar_safe_time_bound(ds.time, INFER_END),
+        )
     )
     # Map 0...360 to -180...180
     ds = ds.assign_coords(lon=(((ds.lon + 180) % 360) - 180))
@@ -546,12 +568,18 @@ def process_chunk(
     # Rename mask dimensions to match our standardized format
     mask_chunk_aligned = mask_chunk.rename({"y": "latitude", "x": "longitude"})
 
-    cm_hist = cmip_chunk_interp.sel(time=slice(TRAIN_START, TRAIN_END)).where(
-        mask_chunk_aligned
-    )
-    cm_fut = cmip_chunk_interp.sel(time=slice(INFER_START, INFER_END)).where(
-        mask_chunk_aligned
-    )
+    cm_hist = cmip_chunk_interp.sel(
+        time=slice(
+            calendar_safe_time_bound(cmip_chunk_interp.time, TRAIN_START),
+            calendar_safe_time_bound(cmip_chunk_interp.time, TRAIN_END),
+        )
+    ).where(mask_chunk_aligned)
+    cm_fut = cmip_chunk_interp.sel(
+        time=slice(
+            calendar_safe_time_bound(cmip_chunk_interp.time, INFER_START),
+            calendar_safe_time_bound(cmip_chunk_interp.time, INFER_END),
+        )
+    ).where(mask_chunk_aligned)
     obs_hist = obs_chunk.sel(time=slice(TRAIN_START, TRAIN_END)).where(
         mask_chunk_aligned
     )
