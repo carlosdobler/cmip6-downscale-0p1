@@ -45,3 +45,10 @@ mri-esm2-0:
   institution_ssp: MRI
   ensemble_member: r1i1p1f1
   grid_label: gn
+
+ukesm1-0-ll:
+  model_name: UKESM1-0-LL
+  institution_hist: MOHC
+  institution_ssp: MOHC
+  ensemble_member: r1i1p1f2
+  grid_label: gn
